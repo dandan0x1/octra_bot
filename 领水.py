@@ -1,0 +1,398 @@
+import requests
+import time
+import json
+import re
+import os
+from typing import Optional, Dict, Any, List
+from colorama import Fore, Style, init
+
+# 初始化colorama
+init(autoreset=True)
+
+# 硬编码的reCAPTCHA站点密钥
+RECAPTCHA_SITE_KEY = "6Ldz43ErAAAAAAmI9YxRIlT9OdtyQ1M1NbdRMATi"
+
+def load_proxy() -> Optional[Dict[str, str]]:
+    """从文件加载代理配置"""
+    try:
+        if os.path.exists('config/proxy.txt'):
+            with open('config/proxy.txt', 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            for line in lines:
+                line = line.strip()
+                # 跳过注释和空行
+                if line.startswith('#') or not line:
+                    continue
+                    
+                # 解析代理配置
+                if line.startswith(('http://', 'https://', 'socks5://')):
+                    print(f"{Fore.GREEN}成功加载代理配置: {line}")
+                    return {
+                        'http': line,
+                        'https': line
+                    }
+            
+            print(f"{Fore.YELLOW}proxy.txt文件中没有找到有效的代理配置")
+            return None
+        else:
+            print(f"{Fore.YELLOW}未找到proxy.txt文件，将不使用代理")
+            return None
+    except Exception as e:
+        print(f"{Fore.RED}读取代理配置文件时发生错误: {str(e)}")
+        return None
+
+class TwoCaptchaSolver:
+    """2captcha.com reCAPTCHA解决器"""
+    
+    def __init__(self, api_key: str, proxies: Optional[Dict[str, str]] = None):
+        self.api_key = api_key
+        self.base_url = "https://2captcha.com"  # 改为HTTPS
+        self.session = requests.Session()
+        if proxies:
+            self.session.proxies.update(proxies)
+            print(f"{Fore.CYAN}2captcha服务将使用代理: {proxies}")
+        
+    def solve_recaptcha(self, site_key: str, page_url: str) -> Optional[str]:
+        """
+        使用2captcha解决reCAPTCHA
+        
+        Args:
+            site_key: reCAPTCHA站点密钥
+            page_url: 包含reCAPTCHA的页面URL
+            
+        Returns:
+            reCAPTCHA响应token或None
+        """
+        try:
+            # 提交reCAPTCHA解决请求
+            submit_url = f"{self.base_url}/in.php"
+            submit_data = {
+                'key': self.api_key,
+                'method': 'userrecaptcha',
+                'googlekey': site_key,
+                'pageurl': page_url,
+                'json': 1
+            }
+            
+            print(f"{Fore.YELLOW}正在提交reCAPTCHA解决请求...")
+            print(f"{Fore.CYAN}请求URL: {submit_url}")
+            
+            # 添加重试机制
+            for attempt in range(3):
+                try:
+                    response = self.session.post(submit_url, data=submit_data, timeout=30)
+                    response.raise_for_status()  # 检查HTTP错误
+                    result = response.json()
+                    
+                    if result.get('status') == 1:
+                        request_id = result.get('request')
+                        print(f"{Fore.GREEN}reCAPTCHA解决请求已提交，ID: {request_id}")
+                        
+                        # 轮询获取结果
+                        return self._get_recaptcha_result(request_id)
+                    else:
+                        print(f"{Fore.RED}提交reCAPTCHA解决请求失败: {result.get('error_text')}")
+                        return None
+                        
+                except requests.exceptions.RequestException as e:
+                    print(f"{Fore.RED}网络请求失败 (尝试 {attempt + 1}/3): {str(e)}")
+                    if attempt < 2:  # 不是最后一次尝试
+                        print(f"{Fore.YELLOW}等待5秒后重试...")
+                        time.sleep(5)
+                    else:
+                        print(f"{Fore.RED}所有重试都失败了")
+                        return None
+                        
+        except Exception as e:
+            print(f"{Fore.RED}解决reCAPTCHA时发生错误: {str(e)}")
+            return None
+    
+    def _get_recaptcha_result(self, request_id: str) -> Optional[str]:
+        """轮询获取reCAPTCHA解决结果"""
+        get_url = f"{self.base_url}/res.php"
+        
+        for attempt in range(30):  # 最多等待5分钟
+            try:
+                params = {
+                    'key': self.api_key,
+                    'action': 'get',
+                    'id': request_id,
+                    'json': 1
+                }
+                
+                response = self.session.get(get_url, params=params, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                
+                if result.get('status') == 1:
+                    print(f"{Fore.GREEN}reCAPTCHA解决成功!")
+                    return result.get('request')
+                elif result.get('request') == 'CAPCHA_NOT_READY':
+                    print(f"{Fore.YELLOW}reCAPTCHA正在解决中... (尝试 {attempt + 1}/30)")
+                    time.sleep(10)  # 等待10秒
+                else:
+                    print(f"{Fore.RED}获取reCAPTCHA结果失败: {result.get('error_text')}")
+                    return None
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"{Fore.RED}获取reCAPTCHA结果时网络错误 (尝试 {attempt + 1}/30): {str(e)}")
+                if attempt < 29:  # 不是最后一次尝试
+                    time.sleep(10)
+                else:
+                    print(f"{Fore.RED}获取reCAPTCHA结果超时")
+                    return None
+            except Exception as e:
+                print(f"{Fore.RED}获取reCAPTCHA结果时发生错误: {str(e)}")
+                return None
+        
+        print(f"{Fore.RED}reCAPTCHA解决超时")
+        return None
+
+class OctraFaucetBot:
+    """Octra水龙头机器人"""
+    
+    def __init__(self, two_captcha_api_key: str, proxies: Optional[Dict[str, str]] = None):
+        self.two_captcha = TwoCaptchaSolver(two_captcha_api_key, proxies)
+        self.session = requests.Session()
+        if proxies:
+            self.session.proxies.update(proxies)
+            print(f"{Fore.CYAN}Octra水龙头将使用代理: {proxies}")
+        self.setup_session()
+        self.results = []  # 存储所有申请结果
+        
+    def setup_session(self):
+        """设置会话头信息"""
+        self.session.headers.update({
+            'accept': '*/*',
+            'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7,ja;q=0.6,fr;q=0.5,ru;q=0.4,und;q=0.3',
+            'dnt': '1',
+            'origin': 'https://faucet.octra.network',
+            'referer': 'https://faucet.octra.network/',
+            'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+        })
+    
+    def claim_tokens(self, address: str, is_validator: bool = False) -> Dict[str, Any]:
+        """
+        申请代币
+        
+        Args:
+            address: Octra钱包地址
+            is_validator: 是否为验证者
+            
+        Returns:
+            响应结果字典
+        """
+        try:
+            # 使用硬编码的reCAPTCHA站点密钥
+            site_key = RECAPTCHA_SITE_KEY
+            print(f"{Fore.CYAN}使用硬编码的reCAPTCHA站点密钥: {site_key}")
+            
+            # 解决reCAPTCHA
+            recaptcha_response = self.two_captcha.solve_recaptcha(
+                site_key=site_key,
+                page_url='https://faucet.octra.network/'
+            )
+            
+            if not recaptcha_response:
+                return {'success': False, 'error': 'reCAPTCHA解决失败'}
+            
+            # 准备表单数据
+            form_data = {
+                'address': address,
+                'is_validator': str(is_validator).lower(),
+                'g-recaptcha-response': recaptcha_response
+            }
+            
+            # 发送申请请求
+            print(f"{Fore.CYAN}正在申请代币...")
+            response = self.session.post(
+                'https://faucet.octra.network/claim',
+                data=form_data,
+                timeout=30
+            )
+            
+            print(f"{Fore.CYAN}响应状态码: {response.status_code}")
+            print(f"{Fore.CYAN}响应内容: {response.text}")
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    return {'success': True, 'data': result, 'address': address}
+                except json.JSONDecodeError:
+                    return {'success': True, 'data': response.text, 'address': address}
+            else:
+                return {'success': False, 'error': f'HTTP错误: {response.status_code}', 'response': response.text, 'address': address}
+                
+        except requests.exceptions.RequestException as e:
+            return {'success': False, 'error': f'网络请求错误: {str(e)}', 'address': address}
+        except Exception as e:
+            return {'success': False, 'error': f'申请代币时发生错误: {str(e)}', 'address': address}
+
+def load_api_key() -> Optional[str]:
+    """从文件加载2captcha API密钥"""
+    try:
+        if os.path.exists('config/2captcha_key.txt'):
+            with open('config/2captcha_key.txt', 'r', encoding='utf-8') as f:
+                api_key = f.read().strip()
+                if api_key:
+                    print(f"{Fore.GREEN}成功从2captcha_key.txt加载API密钥")
+                    return api_key
+                else:
+                    print(f"{Fore.RED}2captcha_key.txt文件为空")
+                    return None
+        else:
+            print(f"{Fore.RED}未找到2captcha_key.txt文件")
+            return None
+    except Exception as e:
+        print(f"{Fore.RED}读取API密钥文件时发生错误: {str(e)}")
+        return None
+
+def load_wallet_addresses() -> List[str]:
+    """从all_outputs.json文件加载钱包地址"""
+    try:
+        if os.path.exists('config/all_outputs.json'):
+            with open('config/all_outputs.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                addresses = [item.get('address') for item in data if item.get('address')]
+                print(f"{Fore.GREEN}成功从all_outputs.json加载了{len(addresses)}个钱包地址")
+                return addresses
+        else:
+            print(f"{Fore.RED}未找到config/all_outputs.json文件")
+            return []
+    except Exception as e:
+        print(f"{Fore.RED}读取钱包地址文件时发生错误: {str(e)}")
+        return []
+
+def save_results(results: List[Dict[str, Any]], filename: str = 'faucet_results.json'):
+    """保存申请结果到文件"""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"{Fore.GREEN}申请结果已保存到 {filename}")
+    except Exception as e:
+        print(f"{Fore.RED}保存结果时发生错误: {str(e)}")
+
+def test_network_connection(proxies: Optional[Dict[str, str]] = None):
+    """测试网络连接"""
+    print(f"{Fore.CYAN}正在测试网络连接...")
+    try:
+        # 测试2captcha.com连接
+        session = requests.Session()
+        if proxies:
+            session.proxies.update(proxies)
+            print(f"{Fore.CYAN}使用代理进行网络测试: {proxies}")
+            
+        response = session.get('https://2captcha.com', timeout=10)
+        print(f"{Fore.GREEN}2captcha.com连接正常")
+        return True
+    except Exception as e:
+        print(f"{Fore.RED}无法连接到2captcha.com: {str(e)}")
+        if proxies:
+            print(f"{Fore.YELLOW}代理连接可能有问题，请检查代理配置")
+        else:
+            print(f"{Fore.YELLOW}请检查网络连接或尝试使用VPN")
+        return False
+
+def show_copyright():
+    """展示版权信息"""
+    copyright_info = f"""{Fore.CYAN}
+    *****************************************************
+    *           X:https://x.com/ariel_sands_dan         *
+    *           Tg:https://t.me/sands0x1                *
+    *           Copyright (c) 2025                      *
+    *           All Rights Reserved                     *
+    *****************************************************
+    {Style.RESET_ALL}
+    """
+    print(copyright_info)
+    print('=' * 50)
+    print(f"{Fore.GREEN}申请key: https://661100.xyz/ {Style.RESET_ALL}")
+    print(f"{Fore.RED}联系Dandan: \n QQ:712987787 QQ群:1036105927 \n 电报:sands0x1 电报群:https://t.me/+fjDjBiKrzOw2NmJl \n 微信: dandan0x1{Style.RESET_ALL}")
+    print('=' * 50)
+
+def main():
+    """主函数"""
+    show_copyright()
+    
+    # 加载代理配置
+    proxies = load_proxy()
+    
+    # 测试网络连接
+    if not test_network_connection(proxies):
+        print(f"{Fore.RED}网络连接测试失败，程序退出!")
+        return
+    
+    # 加载API密钥
+    api_key = load_api_key()
+    if not api_key:
+        print(f"{Fore.RED}无法加载API密钥，程序退出!")
+        return
+    
+    # 加载钱包地址
+    addresses = load_wallet_addresses()
+    if not addresses:
+        print(f"{Fore.RED}无法加载钱包地址，程序退出!")
+        return
+    
+    print(f"{Fore.YELLOW}是否为验证者? (y/n):")
+    is_validator_input = input().strip().lower()
+    is_validator = is_validator_input in ['y', 'yes', '是']
+    
+    # 询问是否继续
+    print(f"{Fore.YELLOW}找到{len(addresses)}个钱包地址，是否开始批量申请? (y/n):")
+    confirm = input().strip().lower()
+    if confirm not in ['y', 'yes', '是']:
+        print(f"{Fore.YELLOW}用户取消操作")
+        return
+    
+    # 创建机器人实例
+    bot = OctraFaucetBot(api_key, proxies)
+    
+    # 批量申请代币
+    print(f"{Fore.CYAN}开始批量申请代币...")
+    successful_count = 0
+    failed_count = 0
+    
+    for i, address in enumerate(addresses, 1):
+        print(f"\n{Fore.CYAN}{'='*50}")
+        print(f"{Fore.CYAN}正在处理第 {i}/{len(addresses)} 个钱包地址")
+        print(f"{Fore.CYAN}地址: {address}")
+        print(f"{Fore.CYAN}{'='*50}")
+        
+        # 申请代币
+        result = bot.claim_tokens(address, is_validator)
+        bot.results.append(result)
+        
+        # 显示结果
+        if result['success']:
+            print(f"{Fore.GREEN}申请成功!")
+            successful_count += 1
+        else:
+            print(f"{Fore.RED}申请失败: {result['error']}")
+            failed_count += 1
+        
+        # 添加延迟，避免请求过于频繁
+        if i < len(addresses):
+            print(f"{Fore.YELLOW}等待5秒后继续下一个...")
+            time.sleep(5)
+    
+    # 显示最终统计
+    print(f"\n{Fore.CYAN}{'='*50}")
+    print(f"{Fore.CYAN}批量申请完成!")
+    print(f"{Fore.GREEN}成功: {successful_count} 个")
+    print(f"{Fore.RED}失败: {failed_count} 个")
+    print(f"{Fore.CYAN}总计: {len(addresses)} 个")
+    print(f"{Fore.CYAN}{'='*50}")
+    
+    # 保存结果
+    save_results(bot.results)
+
+if __name__ == '__main__':
+    main()
