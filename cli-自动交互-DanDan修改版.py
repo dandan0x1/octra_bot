@@ -407,10 +407,10 @@ async def main():
     time.sleep(5)
     global session
     
-    if not ld():
-        sys.exit("[!] wallet.json error")
-    if not addr:
-        sys.exit("[!] wallet.json not configured")
+    # if not ld():
+    #     sys.exit("[!] wallet.json error")
+    # if not addr:
+    #     sys.exit("[!] wallet.json not configured")
     
     try:
         await st()
