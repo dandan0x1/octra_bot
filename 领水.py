@@ -3,14 +3,127 @@ import time
 import json
 import re
 import os
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from colorama import Fore, Style, init
 
 # 初始化colorama
 init(autoreset=True)
 
-# 硬编码的reCAPTCHA站点密钥
-RECAPTCHA_SITE_KEY = "6Ldz43ErAAAAAAmI9YxRIlT9OdtyQ1M1NbdRMATi"
+def load_recaptcha_site_key() -> str:
+    """从配置文件加载reCAPTCHA站点密钥"""
+    try:
+        config_path = 'config/recaptcha_config.txt'
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        print(f"{Fore.GREEN}成功从配置文件加载reCAPTCHA站点密钥: {line}")
+                        return line
+        # 如果配置文件不存在或读取失败，使用默认值
+        default_key = "6LcPKnMrAAAAAEa2Zhf-5iVAWsWPobIO4QTnEUXp"
+        print(f"{Fore.YELLOW}使用默认reCAPTCHA站点密钥: {default_key}")
+        return default_key
+    except Exception as e:
+        print(f"{Fore.RED}读取reCAPTCHA配置文件时发生错误: {str(e)}")
+        default_key = "6LcPKnMrAAAAAEa2Zhf-5iVAWsWPobIO4QTnEUXp"
+        print(f"{Fore.YELLOW}使用默认reCAPTCHA站点密钥: {default_key}")
+        return default_key
+
+# 加载reCAPTCHA站点密钥
+RECAPTCHA_SITE_KEY = load_recaptcha_site_key()
+
+class WalletStatusManager:
+    """钱包状态管理器"""
+    
+    def __init__(self, status_file: str = 'config/wallet_status.json'):
+        self.status_file = status_file
+        self.status_data = self.load_status()
+    
+    def load_status(self) -> Dict[str, Any]:
+        """加载钱包状态"""
+        try:
+            if os.path.exists(self.status_file):
+                with open(self.status_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    print(f"{Fore.GREEN}成功加载钱包状态文件: {self.status_file}")
+                    return data
+            else:
+                print(f"{Fore.YELLOW}钱包状态文件不存在，将创建新文件")
+                return {}
+        except Exception as e:
+            print(f"{Fore.RED}加载钱包状态文件时发生错误: {str(e)}")
+            return {}
+    
+    def save_status(self):
+        """保存钱包状态"""
+        try:
+            with open(self.status_file, 'w', encoding='utf-8') as f:
+                json.dump(self.status_data, f, ensure_ascii=False, indent=2)
+            print(f"{Fore.GREEN}钱包状态已保存到: {self.status_file}")
+        except Exception as e:
+            print(f"{Fore.RED}保存钱包状态时发生错误: {str(e)}")
+    
+    def is_wallet_available(self, address: str) -> bool:
+        """检查钱包是否可用（不在冷却期）"""
+        if address not in self.status_data:
+            return True
+        
+        wallet_info = self.status_data[address]
+        if 'cooldown_until' in wallet_info:
+            cooldown_until = datetime.fromisoformat(wallet_info['cooldown_until'])
+            if datetime.now() < cooldown_until:
+                remaining = cooldown_until - datetime.now()
+                print(f"{Fore.YELLOW}钱包 {address} 仍在冷却期，剩余时间: {remaining}")
+                return False
+        
+        if 'success_until' in wallet_info:
+            success_until = datetime.fromisoformat(wallet_info['success_until'])
+            if datetime.now() < success_until:
+                remaining = success_until - datetime.now()
+                print(f"{Fore.YELLOW}钱包 {address} 成功申请后冷却中，剩余时间: {remaining}")
+                return False
+        
+        return True
+    
+    def record_cooldown(self, address: str, hours: int):
+        """记录冷却期"""
+        cooldown_until = datetime.now() + timedelta(hours=hours)
+        if address not in self.status_data:
+            self.status_data[address] = {}
+        
+        self.status_data[address]['cooldown_until'] = cooldown_until.isoformat()
+        self.status_data[address]['last_update'] = datetime.now().isoformat()
+        self.status_data[address]['status'] = 'cooldown'
+        print(f"{Fore.RED}钱包 {address} 已记录冷却期，{hours}小时后可重新申请")
+        self.save_status()
+    
+    def record_success(self, address: str, amount: float, tx_hash: str, hours: int = 120):
+        """记录成功申请"""
+        success_until = datetime.now() + timedelta(hours=hours)
+        if address not in self.status_data:
+            self.status_data[address] = {}
+        
+        self.status_data[address]['success_until'] = success_until.isoformat()
+        self.status_data[address]['last_update'] = datetime.now().isoformat()
+        self.status_data[address]['status'] = 'success'
+        self.status_data[address]['amount'] = amount
+        self.status_data[address]['tx_hash'] = tx_hash
+        print(f"{Fore.GREEN}钱包 {address} 申请成功，{hours}小时后可重新申请")
+        self.save_status()
+    
+    def record_duplicate_transaction(self, address: str):
+        """记录重复交易错误"""
+        if address not in self.status_data:
+            self.status_data[address] = {}
+        
+        self.status_data[address]['last_update'] = datetime.now().isoformat()
+        self.status_data[address]['status'] = 'duplicate_transaction'
+        self.status_data[address]['error_count'] = self.status_data[address].get('error_count', 0) + 1
+        print(f"{Fore.RED}钱包 {address} 记录重复交易错误")
+        self.save_status()
 
 def load_proxy() -> Optional[Dict[str, str]]:
     """从文件加载代理配置"""
@@ -152,8 +265,9 @@ class TwoCaptchaSolver:
 class OctraFaucetBot:
     """Octra水龙头机器人"""
     
-    def __init__(self, two_captcha_api_key: str):
+    def __init__(self, two_captcha_api_key: str, status_manager: WalletStatusManager):
         self.two_captcha_api_key = two_captcha_api_key
+        self.status_manager = status_manager
         self.results = []  # 存储所有申请结果
         
     def claim_tokens(self, address: str, is_validator: bool = False, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -177,8 +291,10 @@ class OctraFaucetBot:
             session.headers.update({
                 'accept': '*/*',
                 'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7,ja;q=0.6,fr;q=0.5,ru;q=0.4,und;q=0.3',
+                'content-type': 'application/x-www-form-urlencoded',
                 'dnt': '1',
                 'origin': 'https://faucet.octra.network',
+                'priority': 'u=1, i',
                 'referer': 'https://faucet.octra.network/',
                 'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
                 'sec-ch-ua-mobile': '?0',
@@ -198,7 +314,7 @@ class OctraFaucetBot:
             )
             if not recaptcha_response:
                 return {'success': False, 'error': 'reCAPTCHA解决失败'}
-            # 准备表单数据
+            # 准备表单数据 (URL编码格式)
             form_data = {
                 'address': address,
                 'is_validator': str(is_validator).lower(),
@@ -208,15 +324,49 @@ class OctraFaucetBot:
             print(f"{Fore.CYAN}正在申请代币...")
             response = session.post(
                 'https://faucet.octra.network/claim',
-                data=form_data,
+                data=form_data,  # 使用data而不是json，自动进行URL编码
                 timeout=30
             )
             print(f"{Fore.CYAN}响应状态码: {response.status_code}")
             print(f"{Fore.CYAN}响应内容: {response.text}")
+            
+            # 处理响应
             if response.status_code == 200:
                 try:
                     result = response.json()
-                    return {'success': True, 'data': result, 'address': address}
+                    
+                    # 处理冷却期
+                    if not result.get('success') and 'Cooldown active' in result.get('error', ''):
+                        # 提取冷却时间
+                        cooldown_match = re.search(r'Try again in (\d+) hours', result.get('error', ''))
+                        if cooldown_match:
+                            hours = int(cooldown_match.group(1))
+                            self.status_manager.record_cooldown(address, hours)
+                        else:
+                            # 默认98小时
+                            self.status_manager.record_cooldown(address, 98)
+                        return {'success': False, 'error': result.get('error'), 'address': address, 'type': 'cooldown'}
+                    
+                    # 处理成功申请
+                    elif result.get('success') and 'amount' in result and 'tx_hash' in result:
+                        amount = result.get('amount', 0)
+                        tx_hash = result.get('tx_hash', '')
+                        self.status_manager.record_success(address, amount, tx_hash, 120)
+                        return {'success': True, 'data': result, 'address': address, 'type': 'success'}
+                    
+                    # 处理重复交易
+                    elif not result.get('success') and 'Duplicate transaction' in result.get('error', ''):
+                        self.status_manager.record_duplicate_transaction(address)
+                        return {'success': False, 'error': result.get('error'), 'address': address, 'type': 'duplicate'}
+                    
+                    # 其他成功情况
+                    elif result.get('success'):
+                        return {'success': True, 'data': result, 'address': address}
+                    
+                    # 其他错误
+                    else:
+                        return {'success': False, 'error': result.get('error', '未知错误'), 'address': address}
+                        
                 except json.JSONDecodeError:
                     return {'success': True, 'data': response.text, 'address': address}
             else:
@@ -239,7 +389,7 @@ def load_api_key() -> Optional[str]:
                     print(f"{Fore.RED}2captcha_api.txt文件为空")
                     return None
         else:
-            print(f"{Fore.RED}未找到2captcha_api.txt文件")
+            print(f"{Fore.RED}未找到config/2captcha_api.txt文件")
             return None
     except Exception as e:
         print(f"{Fore.RED}读取API密钥文件时发生错误: {str(e)}")
@@ -334,6 +484,9 @@ def main():
     """主函数"""
     show_copyright()
     
+    # 初始化钱包状态管理器
+    status_manager = WalletStatusManager()
+    
     # 加载代理配置
     proxies_list = load_proxies()
     
@@ -349,12 +502,25 @@ def main():
         print(f"{Fore.RED}无法加载钱包地址，程序退出!")
         return
     
+    # 过滤可用钱包
+    available_addresses = []
+    for address in addresses:
+        if status_manager.is_wallet_available(address):
+            available_addresses.append(address)
+        else:
+            print(f"{Fore.YELLOW}跳过钱包 {address} (在冷却期)")
+    
+    if not available_addresses:
+        print(f"{Fore.RED}没有可用的钱包地址，所有钱包都在冷却期!")
+        return
+    
     # 启动时提示
-    print(f"{Fore.YELLOW}检测到 {len(addresses)} 个钱包地址。建议准备 {len(addresses)} 个代理（当前已加载 {len(proxies_list)} 个代理）。")
-    if len(proxies_list) < len(addresses):
-        print(f"{Fore.RED}警告：代理数量少于钱包数量，部分钱包将不使用代理或复用代理！")
-    elif len(proxies_list) > len(addresses):
-        print(f"{Fore.YELLOW}提示：代理数量多于钱包数量，多余的代理不会被使用。")
+    print(f"{Fore.YELLOW}检测到 {len(addresses)} 个钱包地址，其中 {len(available_addresses)} 个可用。")
+    print(f"{Fore.YELLOW}建议准备 {len(available_addresses)} 个代理（当前已加载 {len(proxies_list)} 个代理）。")
+    if len(proxies_list) < len(available_addresses):
+        print(f"{Fore.RED}警告：代理数量少于可用钱包数量，部分钱包将不使用代理或复用代理！")
+    elif len(proxies_list) > len(available_addresses):
+        print(f"{Fore.YELLOW}提示：代理数量多于可用钱包数量，多余的代理不会被使用。")
     
     # 测试网络连接
     test_proxy = proxies_list[0] if proxies_list else None
@@ -367,21 +533,21 @@ def main():
     is_validator = is_validator_input in ['y', 'yes', '是']
     
     # 询问是否继续
-    print(f"{Fore.YELLOW}找到{len(addresses)}个钱包地址，是否开始批量申请? (y/n):")
+    print(f"{Fore.YELLOW}找到{len(available_addresses)}个可用钱包地址，是否开始批量申请? (y/n):")
     confirm = input().strip().lower()
     if confirm not in ['y', 'yes', '是']:
         print(f"{Fore.YELLOW}用户取消操作")
         return
     
     # 创建机器人实例
-    bot = OctraFaucetBot(api_key)
+    bot = OctraFaucetBot(api_key, status_manager)
     # 批量申请代币
     print(f"{Fore.CYAN}开始批量申请代币...")
     successful_count = 0
     failed_count = 0
-    for i, address in enumerate(addresses, 1):
+    for i, address in enumerate(available_addresses, 1):
         print(f"\n{Fore.CYAN}{'='*50}")
-        print(f"{Fore.CYAN}正在处理第 {i}/{len(addresses)} 个钱包地址")
+        print(f"{Fore.CYAN}正在处理第 {i}/{len(available_addresses)} 个钱包地址")
         print(f"{Fore.CYAN}钱包地址: {address}")
         # 取对应代理
         proxy = proxies_list[i-1] if i-1 < len(proxies_list) else None
@@ -402,7 +568,7 @@ def main():
             print(f"{Fore.RED}申请失败: {result['error']}")
             failed_count += 1
         # 添加延迟，避免请求过于频繁
-        if i < len(addresses):
+        if i < len(available_addresses):
             print(f"{Fore.YELLOW}等待5秒后继续下一个...")
             time.sleep(5)
     # 显示最终统计
@@ -410,7 +576,7 @@ def main():
     print(f"{Fore.CYAN}批量申请完成!")
     print(f"{Fore.GREEN}成功: {successful_count} 个")
     print(f"{Fore.RED}失败: {failed_count} 个")
-    print(f"{Fore.CYAN}总计: {len(addresses)} 个")
+    print(f"{Fore.CYAN}总计: {len(available_addresses)} 个")
     print(f"{Fore.CYAN}{'='*50}")
     # 保存结果
     save_results(bot.results)
