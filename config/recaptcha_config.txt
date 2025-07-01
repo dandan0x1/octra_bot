@@ -1,0 +1,7 @@
+# reCAPTCHA配置文件
+# 当前使用的站点密钥
+6LcPKnMrAAAAAEa2Zhf-5iVAWsWPobIO4QTnEUXp
+
+# 备用密钥（如果上面的不工作，可以尝试下面的）
+# 6LfOA04pAAAAAL9ttkwIz40hC63_7IsaU2MgcwVH
+# 6Ldz43ErAAAAAAmI9YxRIlT9OdtyQ1M1NbdRMATi
